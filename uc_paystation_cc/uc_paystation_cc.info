@@ -1,0 +1,6 @@
+; $Id: uc_paystation_cc.info,v 2.0 2013/12/11 17:56:57 longwave Exp $
+name = Paystation three-party payment module
+description = Process payments using the Paystation payment gateway
+dependencies[] = uc_payment
+package = Ubercart - payment
+core = 7.x

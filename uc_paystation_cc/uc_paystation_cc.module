@@ -1,0 +1,419 @@
+<?php
+
+/**
+ * @file
+ * Integrates Paystation 3rd party payment system.
+ * Based on uc_pay_mate, uc_pxaccess and uc_migs3rdparty
+ * Written by Bryan Tabuteau for Face Ltd (http://www.face.co.nz), contracting to Paystation Ltd (http://www.paystation.co.nz).
+ * Funded by EyeQ Design (http://www.eyeq.co.nz)
+ */
+
+//Refer:
+//http://api.ubercart.me/api/drupal/ubercart!payment!uc_payment!uc_payment.api.php/7
+/* * *****************************************************************************
+ * Hook Functions (Drupal)
+ * **************************************************************************** */
+/**
+ * Implementation of hook_menu().
+ */
+function uc_paystation_cc_menu()
+{
+    // http://api.ubercart.me/api/drupal/drupal!modules!system!system.api.php/function/hook_menu/7
+    $items['cart/paystation_cc/complete'] = array(
+        'title' => 'Paystation Payment Successful',
+        'page callback' => 'uc_paystation_cc_complete',
+        'access callback' => TRUE,
+        'type' => MENU_CALLBACK,
+    );
+
+    return $items;
+}
+
+/* * *****************************************************************************
+ * Hook Functions (Ubercart)
+ * **************************************************************************** */
+function uc_paystation_cc_uc_payment_method()
+{
+    //http://api.ubercart.me/api/drupal/ubercart!payment!uc_payment!uc_payment.api.php/function/hook_uc_payment_method/7
+    $path = base_path() . drupal_get_path('module', 'uc_payment');
+    $title = variable_get('uc_paystation_cc_method_title', t('Credit card via Paystation Payment Gateway'));
+
+    $methods['uc_paystation_cc'] = array(
+        'id' => 'uc_paystation_cc',
+        'name' => t('Paystation Payment Gateway'),
+        'title' => $title,
+        'desc' => t('Redirect to Paystation to pay by credit card.'),
+        'callback' => 'uc_payment_method_paystation_cc',
+        'weight' => 3,
+        'checkout' => TRUE,
+        'backend' => TRUE,
+        //'redirect' => 'uc_paystation_cc_review_form_submit',
+        'no_gateway' => TRUE);
+
+    return $methods;
+}
+
+/* * *****************************************************************************
+ * Callback Functions, Forms, and Tables
+ * **************************************************************************** */
+/**
+ * Callback for Paystation payment method settings.
+ */
+function uc_payment_method_paystation_cc($op, &$arg1)
+{
+    switch ($op) {
+        case 'cart-details':
+            $build['#markup'] = t('You will be redirected to Paystation Payment Gateway to complete your payment.');
+            return $build;
+
+        case 'cart-process':
+            return;
+
+        case 'settings':
+            $form['uc_paystation_cc_api_pid'] = array(
+                '#type' => 'textfield',
+                '#title' => t('Paystation Id'),
+                '#description' => t('Your Paystation ID'),
+                '#default_value' => variable_get('uc_paystation_cc_api_pid', ''),
+                '#size' => 6,
+            );
+            $form['uc_paystation_cc_api_gid'] = array(
+                '#type' => 'textfield',
+                '#title' => t('Gateway Id'),
+                '#description' => t('Your Gateway ID'),
+                '#default_value' => variable_get('uc_paystation_cc_api_gid', ''),
+                '#size' => 24,
+            );
+            $form['uc_paystation_cc_api_hmac'] = array(
+                '#type' => 'textfield',
+                '#title' => t('HMAC key'),
+                '#description' => t('HMAC key'),
+                '#default_value' => variable_get('uc_paystation_cc_api_hmac', ''),
+                '#size' => 24,
+            );
+            $form['uc_paystation_cc_method_title'] = array(
+                '#type' => 'textfield',
+                '#title' => t('Payment method title'),
+                '#default_value' => variable_get('uc_paystation_cc_method_title', t('Credit card via Paystation Payment Gateway')),
+            );
+            $form['uc_paystation_cc_api_postback'] = array(
+                '#type' => 'checkbox',
+                '#title' => t('Enable Postback'),
+                '#description' => t('We strongly suggest checking the "Enable Postback" box, as it will allow the cart to capture payment results even
+                                    if your customers re-direct is interrupted.  However, if your development/test environment is local or on a network
+                                    that cannot receive connections from the internet, you must disable Postback. <br/><br/>
+                                Your Paystation account needs to reflect your Ubercart settings accurately, otherwise order status will not update correctly.'),
+                '#default_value' => variable_get('uc_paystation_cc_api_postback', TRUE),
+            );
+            $form['uc_paystation_cc_api_test'] = array(
+                '#type' => 'checkbox',
+                '#title' => t('Enable test mode.'),
+                '#description' => t('In test mode, you must use test cards and amounts. Please see http://www.paystation.co.nz/Paystation-Test-Site for test card numbers.'),
+                '#default_value' => variable_get('uc_paystation_cc_api_test', TRUE),
+            );
+
+            return $form;
+    }
+}
+
+// Form to build the submission to paystation.co.nz.
+function uc_paystation_cc_form($form, &$form_state)
+{
+    $order = uc_order_load($_SESSION['cart_order']);
+    $pstn_am = round($order->order_total * 100);
+    $pstn_mr = $order->order_id;
+
+    $data = array(
+        'pstn_am' => $pstn_am,
+        'pstn_mr' => $pstn_mr,
+    );
+
+    foreach ($data as $name => $value) {
+        $form[$name] = array('#type' => 'hidden', '#value' => $value);
+    }
+    $form['actions'] = array('#type' => 'actions');
+    $form['actions']['submit'] = array(
+        '#type' => 'submit',
+        '#value' => variable_get('uc_paystation_cc_checkout_button', t('Submit Order')),);
+
+    return $form;
+}
+
+function uc_paystation_cc_makePaystationSessionID($min = 8, $max = 8)
+{
+    // seed the random number generator - straight from PHP manual
+    $seed = (double)microtime() * getrandmax();
+    srand($seed);
+
+    $pass = '';
+    // make a string of $max characters with ASCII values of 40-122
+    $p = 0;
+    while ($p < $max):
+        $r = chr(123 - (rand() % 75));
+
+        // get rid of all non-alphanumeric characters
+        if (!($r >= 'a' && $r <= 'z') && !($r >= 'A' && $r <= 'Z') && !($r >= '1' && $r <= '9'))
+            continue;
+        $pass .= $r;
+
+        $p++;
+    endwhile;
+    // if string is too short, remake it
+    if (strlen($pass) < $min):
+        $pass = $this->makePaystationSessionID($min, $max);
+    endif;
+
+    return $pass;
+}
+
+function uc_paystation_cc_review_form_submit($form, &$form_state, $form_id = null)
+{
+    if (!isset($form_state['clicked_button']))
+        return;
+    if ($form_state['clicked_button']['#value'] != 'Submit Order')
+        return;
+
+    $pstn_pi = trim(variable_get('uc_paystation_cc_api_pid', ''));
+    $pstn_gi = trim(variable_get('uc_paystation_cc_api_gid', ''));
+    $test_mode = variable_get('uc_paystation_cc_api_test', '');
+    if ($test_mode == true)
+        $test_string = '&pstn_tm=t';
+    else
+        $test_string = "";
+    $order = uc_order_load($_SESSION['cart_order']);
+    $pstn_am = round($order->order_total * 100);
+    $pstn_mr = $order->order_id . ":";
+
+    $pstn_ms = $pstn_mr . '_' . time() . '-' . uc_paystation_cc_makePaystationSessionID(8, 8);
+    $other_id = uc_cart_get_id();
+    if ($test_mode) $pstn_mr .= "test-mode";
+    else $pstn_mr .= " ";
+
+    $paystationURL = 'https://www.paystation.co.nz/direct/paystation.dll';
+    $paystationParams = "paystation=_empty&pstn_nr=t&pstn_pi=$pstn_pi&pstn_gi=$pstn_gi&pstn_ms=$pstn_ms&pstn_am=$pstn_am&pstn_mr=$pstn_mr" . $test_string . "&cart_id=" . $other_id;
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $paystationParams);
+    curl_setopt($ch, CURLOPT_URL, $paystationURL);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    if (isset($_SERVER['HTTP_USER_AGENT'])) {
+        curl_setopt($ch, CURLOPT_USERAGENT, $_SERVER['HTTP_USER_AGENT']);
+    }
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    $result = curl_exec($ch);
+    curl_close($ch);
+    $p = xml_parser_create();
+    xml_parse_into_struct($p, $result, $vals, $tags);
+    xml_parser_free($p);
+    for ($j = 0; $j < count($vals); $j++) {
+        if (!strcmp($vals[$j]["tag"], "TI") && isset($vals[$j]["value"])) {
+            $returnTI = $vals[$j]["value"];
+        }
+        if (!strcmp($vals[$j]["tag"], "EC") && isset($vals[$j]["value"])) {
+            $errorCode = $vals[$j]["value"];
+        }
+        if (!strcmp($vals[$j]["tag"], "DIGITALORDER") && isset($vals[$j]["value"])) {
+            $digitalOrder = $vals[$j]["value"];
+        }
+    }
+
+    // Redirect the customers using the Digital Order
+    if (isset($digitalOrder)) {
+        $form_state['redirect'] = $digitalOrder;
+        return $form;
+    } else {
+        exit("digitalOrder not set");
+    }
+}
+
+function uc_paystation_cc_form_uc_cart_checkout_review_form_alter(&$form, &$form_state, $form_id)
+{
+    $order = $form_state['uc_order'];
+    $method = $order->payment_method;
+    if ($method != 'uc_paystation_cc')
+        return $form;
+
+    if (!isset($form['actions']))
+        $form['actions'] = array('#type' => 'actions');
+    $form['actions']['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('Submit Order'),
+        '#submit' => array('uc_paystation_cc_review_form_submit')
+    );
+
+    return $form;
+}
+
+function uc_paystation_cc_complete($cart_id = 0)
+{
+    if (isset($_GET['ec'])) {
+        return uc_paystation_cc_return($cart_id);
+    } else {//postback
+        $xml = file_get_contents('php://input');
+        $xml = simplexml_load_string($xml);
+
+        uc_paystation_cc_postback($xml);
+    }
+}
+
+//proccess postback response
+function uc_paystation_cc_postback($xml)
+{
+    global $user;
+
+    watchdog('Paystation three party', t('Receiving new order notification for order !order_id.', array('!order_id' => check_plain($xml["merchant_ref"]))));
+    $mr = (int)$xml->MerchantReference;
+
+    $am = (int)$xml->PurchaseAmount;
+    $ec = $xml->ec;
+
+    $xpl = explode(':', $mr);
+
+    $test_mode = variable_get('uc_paystation_cc_api_test', '');
+    $postback = variable_get('uc_paystation_cc_api_postback', '');
+    if (!$postback) return false;
+
+    if ($xpl[1] == "test-mode" && !$test_mode) return false;
+
+    $order_id = $xpl[0];
+
+    $order = uc_order_load((int)$order_id);
+
+    $message = t($errorMessage . ' received from Paystation: !amount', array('!amount' => uc_currency_format($paymentAmount / 100)));
+
+    if ($ec == "0") {
+        uc_payment_enter($order->order_id, 'paystation_cc', $order->order_total, 0, NULL, $comment);
+        uc_order_comment_save($order->order_id, $user->uid, t('A payment has been accepted.'), 'payment_received');
+    } else {
+        uc_order_state_default('post_checkout');
+        uc_order_comment_save($order->order_id, $user->uid, t('A payment has failed.'), 'admin');
+
+        uc_order_save($order);
+        $r = uc_order_update_status($order->order_id, 'paystation_payment_unsuccessful');
+
+        watchdog('uc_paystation_cc', t('Transaction failed!'), WATCHDOG_ERROR);
+    }
+}
+
+function uc_paystation_cc_return($cart_id = 0)
+{
+    global $user;
+    watchdog('Paystation three party', t('Receiving new order notification for order !order_id.', array('!order_id' => check_plain($_GET["merchant_ref"]))));
+    $errorExists = false;
+    $order_id = intval($_SESSION['cart_order']);
+
+    $errorCode = $_GET["ec"];
+    $errorMessage = $_GET["em"];
+    $order = uc_order_load($order_id);
+    $paymentAmount = uc_order_get_total($order);
+    $merchantSession = $_GET["ms"];
+
+    $postback = variable_get('uc_paystation_cc_api_postback', '');
+
+    if (($order->order_status != 'payment_received') && ($order->order_status != 'completed')) {
+        $message = t($errorMessage . ' received from Paystation: !amount', array('!amount' => uc_currency_format($paymentAmount / 100)));
+        uc_order_comment_save($order_id, $user->uid, $message, 'admin');
+        $output = "";
+
+        if ($errorCode == "0") {
+            $transactionVerified = false;
+            $verificationResponseCode = transactionVerification(variable_get('uc_paystation_cc_api_pid', ''), '', $merchantSession);
+            if (!$postback) {
+                $transactionVerified = (!strcmp($verificationResponseCode, "0"));
+                if ($transactionVerified) {
+                    $comment = t('Order ID: @txn_id', array('@txn_id' => $order->order_id));
+                    uc_payment_enter($order->order_id, 'paystation_cc', $order->order_total, 0, NULL, $comment);
+
+                    uc_order_comment_save($order->order_id, $user->uid, t('A payment has been accepted.'), 'payment_received');
+                    uc_cart_empty($cart_id);
+                    uc_cart_complete_sale($order);
+
+                    watchdog('uc_paystation_cc', t('Transaction was completed successfully!'), WATCHDOG_NOTICE);
+                    $output .= t("Transaction was completed successfully!");
+                } else {
+                    $output .= t("Transaction not verified.  Please contact us for assistance.");
+                }
+            } else {
+                uc_cart_empty($cart_id);
+                $output .= t("Transaction was completed successfully!");
+            }
+        } else {
+            if (!$postback)
+                uc_cart_complete_sale($order);
+            uc_order_comment_save($order->order_id, $user->uid, t('A payment has failed.'), 'admin');
+            uc_order_save($order);
+            uc_order_update_status($order_id, 'paystation_payment_unsuccessful');
+
+            if (!$postback)
+                watchdog('uc_paystation_cc', t('Transaction failed!'), WATCHDOG_ERROR);
+
+            $output = t('Your Payment has failed. Paystation returned the following error: ' . $errorCode . ' - ' . $errorMessage . '.  Please contact us for assistance.');
+            drupal_set_title("Paystation Payment Unsuccessful");
+        }
+    } else {
+        if (!$postback) $output = t('Order already completed');
+        else $output = t("Transaction was completed successfully!");
+    }
+
+    return $output;
+}
+
+function quickLookup($pi, $type, $value)
+{
+    $url = "https://payments.paystation.co.nz/lookup/"; //
+    $params = "&pi=$pi&$type=$value";
+
+    $authenticationKey = variable_get('uc_paystation_cc_api_hmac', '');
+    $hmacWebserviceName = 'paystation';
+    $pstn_HMACTimestamp = time();
+
+    $hmacBody = pack('a*', $pstn_HMACTimestamp) . pack('a*', $hmacWebserviceName) . pack('a*', $params);
+    $hmacHash = hash_hmac('sha512', $hmacBody, $authenticationKey);
+    $hmacGetParams = '?pstn_HMACTimestamp=' . $pstn_HMACTimestamp . '&pstn_HMAC=' . $hmacHash;
+
+    $url .= $hmacGetParams;
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $params);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    if (isset($_SERVER['HTTP_USER_AGENT'])) {
+        curl_setopt($ch, CURLOPT_USERAGENT, $_SERVER['HTTP_USER_AGENT']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    }
+    $result = curl_exec($ch);
+    curl_close($ch);
+
+    return $result;
+}
+
+function transactionVerification($paystationID, $transactionID, $merchantSession)
+{
+    $transactionVerified = '';
+    $lookupXML = quickLookup($paystationID, 'ms', $merchantSession);
+    $p = xml_parser_create();
+    xml_parse_into_struct($p, $lookupXML, $vals, $tags);
+    xml_parser_free($p);
+    foreach ($tags as $key => $val) {
+        if ($key == "PAYSTATIONERRORCODE") {
+            for ($i = 0; $i < count($val); $i++) {
+                $responseCode = parseCode($vals);
+                $transactionVerified = $responseCode;
+            }
+        }
+    }
+
+    return $transactionVerified;
+}
+
+function parseCode($mvalues)
+{
+    $result = '';
+    for ($i = 0; $i < count($mvalues); $i++) {
+        if (!strcmp($mvalues[$i]["tag"], "QSIRESPONSECODE") && isset($mvalues[$i]["value"])) {
+            $result = $mvalues[$i]["value"];
+        }
+    }
+    return $result;
+}
